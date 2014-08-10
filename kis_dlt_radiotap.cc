@@ -238,6 +238,7 @@ parse_iterator(struct ieee80211_radiotap_iterator *iter,
 	case IEEE80211_RADIOTAP_XCHANNEL:
 		radiotap_flags_parse(radioheader, u.u32);
 		radioheader->freq_mhz = u2.u16;
+		radioheader->channel = u3.u8;
 		break;
 
 	case IEEE80211_RADIOTAP_CHANNEL:
