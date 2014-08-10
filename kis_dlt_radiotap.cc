@@ -35,28 +35,21 @@
 #include <net80211/ieee80211_radiotap.h>
 #endif // Open/Net
 
-#ifdef SYS_FREEBSD
-#include <net80211/ieee80211_radiotap.h>
-#endif // FreeBSD
-
-// Include the linux system radiotap headers
-#ifdef HAVE_LINUX_SYS_RADIOTAP
-#include <net/ieee80211_radiotap.h>
-#endif
-
-// If we couldn't make any sense of system rt headers (OSX perhaps, or
-// win32, or an older linux) then pull in the local radiotap copy
-#ifdef HAVE_LOCAL_RADIOTAP
-#include "local_ieee80211_radiotap.h"
-#endif
+/* Radiotap parser and iterator functions */
+extern "C" {
+#include "radiotap_parser.h"
+#include "radiotap_parser_iter.h"
+};
 
 #include "kis_dlt_radiotap.h"
 
 #include "tcpdump-extract.h"
 
+#if 0
 // Extension to radiotap header not yet included in all BSD's
 #ifndef IEEE80211_RADIOTAP_F_FCS
 #define IEEE80211_RADIOTAP_F_FCS        0x10    /* frame includes FCS */
+#endif
 #endif
 
 Kis_DLT_Radiotap::Kis_DLT_Radiotap(GlobalRegistry *in_globalreg) :
@@ -116,6 +109,170 @@ Kis_DLT_Radiotap::~Kis_DLT_Radiotap() {
 #define BITNO_4(x) (((x) >> 2) ? 2 + BITNO_2((x) >> 2) : BITNO_2((x)))
 #define BITNO_2(x) (((x) & 2) ? 1 : 0)
 #define BIT(n)	(1 << n)
+
+static const struct radiotap_align_size align_size_000000_00[] = {
+        [0] = { .align = 1, .size = 4, },
+        [52] = { .align = 1, .size = 4, },
+};
+
+static const struct ieee80211_radiotap_namespace vns_array[] = {
+        {
+                .oui = 0x000000,
+                .subns = 0,
+                .n_bits = sizeof(align_size_000000_00),
+                .align_size = align_size_000000_00,
+        },
+};
+
+static const struct ieee80211_radiotap_vendor_namespaces vns = {
+        .ns = vns_array,
+        .n_ns = sizeof(vns_array)/sizeof(vns_array[0]),
+};
+
+static inline void
+radiotap_flags_parse(kis_layer1_packinfo *radioheader, uint32_t flags)
+{
+	if (IEEE80211_IS_CHAN_FHSS(flags))
+		radioheader->carrier = carrier_80211fhss;
+	else if (IEEE80211_IS_CHAN_A(flags))
+		radioheader->carrier = carrier_80211a;
+	else if (IEEE80211_IS_CHAN_BPLUS(flags))
+		radioheader->carrier = carrier_80211bplus;
+	else if (IEEE80211_IS_CHAN_B(flags))
+		radioheader->carrier = carrier_80211b;
+	else if (IEEE80211_IS_CHAN_PUREG(flags))
+		radioheader->carrier = carrier_80211g;
+	else if (IEEE80211_IS_CHAN_G(flags))
+		radioheader->carrier = carrier_80211g;
+	else if (IEEE80211_IS_CHAN_T(flags))
+		radioheader->carrier = carrier_80211a;/*XXX*/
+	else
+		radioheader->carrier = carrier_unknown;
+
+	if ((flags & IEEE80211_CHAN_CCK) == IEEE80211_CHAN_CCK)
+		radioheader->encoding = encoding_cck;
+	else if ((flags & IEEE80211_CHAN_OFDM) == IEEE80211_CHAN_OFDM)
+		radioheader->encoding = encoding_ofdm;
+	else if ((flags & IEEE80211_CHAN_DYN) == IEEE80211_CHAN_DYN)
+		radioheader->encoding = encoding_dynamiccck;
+	else if ((flags & IEEE80211_CHAN_GFSK) == IEEE80211_CHAN_GFSK)
+		radioheader->encoding = encoding_gfsk;
+	else
+		radioheader->encoding = encoding_unknown;
+}
+
+static inline void
+parse_iterator(struct ieee80211_radiotap_iterator *iter,
+    kis_layer1_packinfo *radioheader)
+{
+	const char *dp = (const char *) iter->this_arg;
+
+	union {
+		int8_t	i8;
+		int16_t	i16;
+		u_int8_t	u8;
+		u_int16_t	u16;
+		u_int32_t	u32;
+		u_int64_t	u64;
+	} u, u2, u3, u4;
+
+	u.u64 = 0;
+	u2.u64 = 0;
+	u3.u64 = 0;
+	u4.u64 = 0;
+
+	switch (iter->this_arg_index) {
+	case IEEE80211_RADIOTAP_FLAGS:
+	case IEEE80211_RADIOTAP_RATE:
+#if 0
+	case IEEE80211_RADIOTAP_DB_ANTSIGNAL:
+	case IEEE80211_RADIOTAP_DB_ANTNOISE:
+#endif
+	case IEEE80211_RADIOTAP_DBM_ANTSIGNAL:
+	case IEEE80211_RADIOTAP_DBM_ANTNOISE:
+	case IEEE80211_RADIOTAP_ANTENNA:
+		u.u8 = *dp;
+		break;
+
+	case IEEE80211_RADIOTAP_DBM_TX_POWER:
+		u.i8 = *dp;
+		break;
+
+	case IEEE80211_RADIOTAP_CHANNEL:
+		u.u16 = EXTRACT_LE_16BITS(dp);
+		dp += sizeof(u.u16);
+		u2.u16 = EXTRACT_LE_16BITS(dp);
+		iter += sizeof(u2.u16);
+		break;
+
+	case IEEE80211_RADIOTAP_XCHANNEL:
+		u.u32 = EXTRACT_LE_32BITS(dp);	/* flags */
+		dp += sizeof(u.u32);
+		u2.u16 = EXTRACT_LE_16BITS(dp);	/* freq */
+		dp += sizeof(u.u16);
+		u3.u8 = EXTRACT_LE_8BITS(dp);	/* ieee channumber */
+		dp += sizeof(u.u8);
+		u4.u8 = EXTRACT_LE_8BITS(dp);	/* max power */
+		dp += sizeof(u.u8);
+		break;
+
+	case IEEE80211_RADIOTAP_FHSS:
+	case IEEE80211_RADIOTAP_LOCK_QUALITY:
+	case IEEE80211_RADIOTAP_TX_ATTENUATION:
+	case IEEE80211_RADIOTAP_DB_TX_ATTENUATION:
+		u.u16 = EXTRACT_LE_16BITS(dp);
+		dp += sizeof(u.u16);
+		break;
+
+	case IEEE80211_RADIOTAP_TSFT:
+		u.u64 = EXTRACT_LE_64BITS(dp);
+		dp += sizeof(u.u64);
+		break;
+
+	default:
+		return;
+	}
+
+	/* Now, populate the header details */
+	switch (iter->this_arg_index) {
+	case IEEE80211_RADIOTAP_XCHANNEL:
+		radiotap_flags_parse(radioheader, u.u32);
+		radioheader->freq_mhz = u2.u16;
+		break;
+
+	case IEEE80211_RADIOTAP_CHANNEL:
+		radioheader->freq_mhz = u.u16;
+		radiotap_flags_parse(radioheader, ((uint32_t) u2.u16) & 0xffff);
+		break;
+
+	case IEEE80211_RADIOTAP_RATE:
+		/* strip basic rate bit & convert to kismet units */
+		radioheader->datarate = ((u.u8 &~ 0x80) / 2) * 10;
+		break;
+
+	/* ignore DB values, they're not helpful */
+#if 0
+                case IEEE80211_RADIOTAP_DB_ANTSIGNAL:
+                    radioheader->signal_dbm = u.i8;
+                    break;
+                case IEEE80211_RADIOTAP_DB_ANTNOISE:
+                    radioheader->noise_dbm = u.i8;
+                    break;
+#endif
+
+	case IEEE80211_RADIOTAP_DBM_ANTSIGNAL:
+		radioheader->signal_dbm = u.i8;
+		break;
+	case IEEE80211_RADIOTAP_DBM_ANTNOISE:
+		radioheader->noise_dbm = u.i8;
+		break;
+
+	/* XXX TODO: fcs */
+	default:
+		break;
+	}
+}
+
 int Kis_DLT_Radiotap::HandlePacket(kis_packet *in_pack) {
 	kis_datachunk *decapchunk = 
 		(kis_datachunk *) in_pack->fetch(pack_comp_decap);
@@ -145,212 +302,51 @@ int Kis_DLT_Radiotap::HandlePacket(kis_packet *in_pack) {
 		return 1;
 	}
 
-	union {
-		int8_t	i8;
-		int16_t	i16;
-		u_int8_t	u8;
-		u_int16_t	u16;
-		u_int32_t	u32;
-		u_int64_t	u64;
-	} u;
-	union {
-		int8_t		i8;
-		int16_t		i16;
-		u_int8_t	u8;
-		u_int16_t	u16;
-		u_int32_t	u32;
-		u_int64_t	u64;
-	} u2;
-
-	u2.u64 = 0;
-
 	struct ieee80211_radiotap_header *hdr;
-	u_int32_t present, next_present;
-	u_int32_t *presentp, *last_presentp;
-	enum ieee80211_radiotap_type bit;
-	int bit0;
-	const u_char *iter;
-	const u_char *iter_start;
-	unsigned int iter_align;
 	int fcs_cut = 0; // Is the FCS bit set?
 	char errstr[STATUS_MAX];
+	struct ieee80211_radiotap_iterator iter;
+	int err;
 
 	kis_layer1_packinfo *radioheader = NULL;
 
-    if (linkchunk->length < sizeof(*hdr)) {
+	if (linkchunk->length < sizeof(*hdr)) {
 		snprintf(errstr, STATUS_MAX, "pcap radiotap converter got corrupted "
 				 "Radiotap header length");
 		globalreg->messagebus->InjectMessage(errstr, MSGFLAG_ERROR);
-        return 0;
-    }
+		return 0;
+	}
 
 	// Assign it to the callback data
-    hdr = (struct ieee80211_radiotap_header *) linkchunk->data;
-    if (linkchunk->length < EXTRACT_LE_16BITS(&hdr->it_len)) {
+	hdr = (struct ieee80211_radiotap_header *) linkchunk->data;
+	if (linkchunk->length < EXTRACT_LE_16BITS(&hdr->it_len)) {
 		snprintf(errstr, STATUS_MAX, "pcap radiotap converter got corrupted "
 				 "Radiotap header length");
 		globalreg->messagebus->InjectMessage(errstr, MSGFLAG_ERROR);
-        return 0;
-    }
-
-	// null-statement for-loop
-    for (last_presentp = &hdr->it_present;
-         (EXTRACT_LE_32BITS(last_presentp) & BIT(IEEE80211_RADIOTAP_EXT)) != 0 &&
-         (u_char *) (last_presentp + 1) <= linkchunk->data + 
-		 EXTRACT_LE_16BITS(&(hdr->it_len)); last_presentp++);
-
-    /* are there more bitmap extensions than bytes in header? */
-    if ((EXTRACT_LE_32BITS(last_presentp) & BIT(IEEE80211_RADIOTAP_EXT)) != 0) {
-		snprintf(errstr, STATUS_MAX, "pcap radiotap converter got corrupted "
-				 "Radiotap bitmap length");
-		globalreg->messagebus->InjectMessage(errstr, MSGFLAG_ERROR);
-        return 0;
-    }
+		return 0;
+	}
 
 	decapchunk = new kis_datachunk;
 	radioheader = new kis_layer1_packinfo;
-
 	decapchunk->dlt = KDLT_IEEE802_11;
-	
-    iter_start = iter = (u_char*)(last_presentp + 1);
 
-    for (bit0 = 0, presentp = &hdr->it_present; presentp <= last_presentp;
-         presentp++, bit0 += 32) {
-        for (present = EXTRACT_LE_32BITS(presentp); present; present = next_present) {
-            /* clear the least significant bit that is set */
-            next_present = present & (present - 1);
+	/* Pass to the radiotap iterator */
+	err = ieee80211_radiotap_iterator_init(&iter, hdr,
+	    linkchunk->length, &vns);
+	if (err) {
+		snprintf(errstr, STATUS_MAX,
+		    "malformed radiotap header (init returns %d)\n",
+		    err);
+		return (0);
+	}
 
-            /* extract the least significant bit that is set */
-            bit = (enum ieee80211_radiotap_type)
-                (bit0 + BITNO_32(present ^ next_present));
+	while (! (err = ieee80211_radiotap_iterator_next(&iter))) {
+		if (! iter.is_radiotap_ns)
+			continue;
+		parse_iterator(&iter, radioheader);
+	}
 
-            switch (bit) {
-                case IEEE80211_RADIOTAP_FLAGS:
-                case IEEE80211_RADIOTAP_RATE:
-				/*
-                case IEEE80211_RADIOTAP_DB_ANTSIGNAL:
-                case IEEE80211_RADIOTAP_DB_ANTNOISE:
-				*/
-                case IEEE80211_RADIOTAP_DBM_ANTSIGNAL:
-                case IEEE80211_RADIOTAP_DBM_ANTNOISE:
-                case IEEE80211_RADIOTAP_ANTENNA:
-                    u.u8 = *iter++;
-                    break;
-                case IEEE80211_RADIOTAP_DBM_TX_POWER:
-                    u.i8 = *iter++;
-                    break;
-                case IEEE80211_RADIOTAP_CHANNEL:
-					iter_align = ALIGN_OFFSET((unsigned int) (iter - iter_start), 2);
-					iter += iter_align;
-
-                    u.u16 = EXTRACT_LE_16BITS(iter);
-                    iter += sizeof(u.u16);
-                    u2.u16 = EXTRACT_LE_16BITS(iter);
-                    iter += sizeof(u2.u16);
-                    break;
-                case IEEE80211_RADIOTAP_FHSS:
-                case IEEE80211_RADIOTAP_LOCK_QUALITY:
-                case IEEE80211_RADIOTAP_TX_ATTENUATION:
-                case IEEE80211_RADIOTAP_DB_TX_ATTENUATION:
-					iter_align = ALIGN_OFFSET((unsigned int) (iter - iter_start), 2);
-					iter += iter_align;
-
-                    u.u16 = EXTRACT_LE_16BITS(iter);
-                    iter += sizeof(u.u16);
-                    break;
-                case IEEE80211_RADIOTAP_TSFT:
-					iter_align = ALIGN_OFFSET((unsigned int) (iter - iter_start), 8);
-					iter += iter_align;
-
-                    u.u64 = EXTRACT_LE_64BITS(iter);
-                    iter += sizeof(u.u64);
-                    break;
-#if defined(SYS_OPENBSD)
-                case IEEE80211_RADIOTAP_RSSI:
-                    u.u8 = EXTRACT_LE_8BITS(iter);
-                    iter += sizeof(u.u8);
-                    u2.u8 = EXTRACT_LE_8BITS(iter);
-                    iter += sizeof(u2.u8);
-                    break;
-#endif
-                default:
-                    /* this bit indicates a field whose
-                     * size we do not know, so we cannot
-                     * proceed.
-                     */
-                    next_present = 0;
-                    continue;
-            }
-
-			// static int pnum = 0;
-            switch (bit) {
-                case IEEE80211_RADIOTAP_CHANNEL:
-                    // radioheader->channel = ieee80211_mhz2ieee(u.u16, u2.u16);
-                    radioheader->freq_mhz = u.u16;
-					// printf("debug - %d freq %u\n", pnum++, radioheader->freq_mhz);
-                    if (IEEE80211_IS_CHAN_FHSS(u2.u16))
-                        radioheader->carrier = carrier_80211fhss;
-                    else if (IEEE80211_IS_CHAN_A(u2.u16))
-                        radioheader->carrier = carrier_80211a;
-                    else if (IEEE80211_IS_CHAN_BPLUS(u2.u16))
-                        radioheader->carrier = carrier_80211bplus;
-                    else if (IEEE80211_IS_CHAN_B(u2.u16))
-                        radioheader->carrier = carrier_80211b;
-                    else if (IEEE80211_IS_CHAN_PUREG(u2.u16))
-                        radioheader->carrier = carrier_80211g;
-                    else if (IEEE80211_IS_CHAN_G(u2.u16))
-                        radioheader->carrier = carrier_80211g;
-                    else if (IEEE80211_IS_CHAN_T(u2.u16))
-                        radioheader->carrier = carrier_80211a;/*XXX*/
-                    else
-                        radioheader->carrier = carrier_unknown;
-                    if ((u2.u16 & IEEE80211_CHAN_CCK) == IEEE80211_CHAN_CCK)
-                        radioheader->encoding = encoding_cck;
-                    else if ((u2.u16 & IEEE80211_CHAN_OFDM) == IEEE80211_CHAN_OFDM)
-                        radioheader->encoding = encoding_ofdm;
-                    else if ((u2.u16 & IEEE80211_CHAN_DYN) == IEEE80211_CHAN_DYN)
-                        radioheader->encoding = encoding_dynamiccck;
-                    else if ((u2.u16 & IEEE80211_CHAN_GFSK) == IEEE80211_CHAN_GFSK)
-                        radioheader->encoding = encoding_gfsk;
-                    else
-                        radioheader->encoding = encoding_unknown;
-                    break;
-                case IEEE80211_RADIOTAP_RATE:
-					/* strip basic rate bit & convert to kismet units */
-                    radioheader->datarate = ((u.u8 &~ 0x80) / 2) * 10;
-                    break;
-				/* ignore DB values, they're not helpful
-                case IEEE80211_RADIOTAP_DB_ANTSIGNAL:
-                    radioheader->signal_dbm = u.i8;
-                    break;
-                case IEEE80211_RADIOTAP_DB_ANTNOISE:
-                    radioheader->noise_dbm = u.i8;
-                    break;
-				*/
-				case IEEE80211_RADIOTAP_DBM_ANTSIGNAL:
-					radioheader->signal_dbm = u.i8;
-					break;
-				case IEEE80211_RADIOTAP_DBM_ANTNOISE:
-					radioheader->noise_dbm = u.i8;
-					break;
-                case IEEE80211_RADIOTAP_FLAGS:
-                    if (u.u8 & IEEE80211_RADIOTAP_F_FCS) {
-						fcs_cut = 4;
-					}
-                    break;
-#if defined(SYS_OPENBSD)
-                case IEEE80211_RADIOTAP_RSSI:
-                    /* Convert to Kismet units...  No reason to use RSSI units
-					 * here since we know the conversion factor */
-                    radioheader->signal_dbm = int((float(u.u8) / float(u2.u8) * 255));
-                    break;
-#endif
-                default:
-                    break;
-            }
-        }
-    }
-
+	/* XXX verify this stuff! */
 	if (EXTRACT_LE_16BITS(&(hdr->it_len)) + fcs_cut > (int) linkchunk->length) {
 		/*
 		_MSG("Pcap Radiotap converter got corrupted Radiotap frame, not "
@@ -358,7 +354,7 @@ int Kis_DLT_Radiotap::HandlePacket(kis_packet *in_pack) {
 		*/
 		delete decapchunk;
 		delete radioheader;
-        return 0;
+		return 0;
 	}
 
 #if 0
@@ -401,7 +397,6 @@ int Kis_DLT_Radiotap::HandlePacket(kis_packet *in_pack) {
 		} else {
 			fcschunk->checksum_valid = 1;
 		}
-
 	}
 
 	return 1;

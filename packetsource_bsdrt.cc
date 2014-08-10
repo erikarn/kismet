@@ -349,8 +349,8 @@ int PacketSource_BSDRT::OpenSource() {
 		|| defined(SYS_DARWIN)
 	// Set the DLT in the order of what we want least, since the last one we
 	// set will stick
-	pcap_set_datalink(pd, DLT_IEEE802_11);
-	pcap_set_datalink(pd, DLT_IEEE802_11_RADIO_AVS);
+//	pcap_set_datalink(pd, DLT_IEEE802_11);
+//	pcap_set_datalink(pd, DLT_IEEE802_11_RADIO_AVS);
 	pcap_set_datalink(pd, DLT_IEEE802_11_RADIO);
 	// Hack to re-enable promisc mode since changing the DLT seems to make it
 	// drop it on some bsd pcap implementations
